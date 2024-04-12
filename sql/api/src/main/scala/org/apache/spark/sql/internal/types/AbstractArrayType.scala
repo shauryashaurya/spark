@@ -14,11 +14,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.catalyst.plans.logical
 
-import org.apache.spark.sql.streaming.TimeoutMode
+package org.apache.spark.sql.internal.types
 
-/** Types of timeouts used in transformWithState operator */
-case object NoTimeouts extends TimeoutMode
-case object ProcessingTime extends TimeoutMode
-case object EventTime extends TimeoutMode
+import org.apache.spark.sql.types.{AbstractDataType, ArrayType, DataType}
+
+
+/**
+ * Use AbstractArrayType(AbstractDataType) for defining expected types for expression parameters.
+ */
+case class AbstractArrayType(elementType: AbstractDataType) extends AbstractDataType {
+
+  override private[sql] def defaultConcreteType: DataType =
+    ArrayType(elementType.defaultConcreteType, containsNull = true)
+
+  override private[sql] def acceptsType(other: DataType): Boolean = {
+    other.isInstanceOf[ArrayType] &&
+      elementType.acceptsType(other.asInstanceOf[ArrayType].elementType)
+  }
+
+  override private[spark] def simpleString: String = s"array<${elementType.simpleString}>"
+}
