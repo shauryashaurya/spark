@@ -196,10 +196,38 @@ public final class CollationFactory {
       final UTF8String targetUTF8String,
       final UTF8String patternUTF8String,
       final int collationId) {
-    String pattern = patternUTF8String.toString();
-    CharacterIterator target = new StringCharacterIterator(targetUTF8String.toString());
+    return getStringSearch(targetUTF8String.toString(), patternUTF8String.toString(), collationId);
+  }
+
+  /**
+   * Returns a StringSearch object for the given pattern and target strings, under collation
+   * rules corresponding to the given collationId. The external ICU library StringSearch object can
+   * be used to find occurrences of the pattern in the target string, while respecting collation.
+   */
+  public static StringSearch getStringSearch(
+          final String targetString,
+          final String patternString,
+          final int collationId) {
+    CharacterIterator target = new StringCharacterIterator(targetString);
     Collator collator = CollationFactory.fetchCollation(collationId).collator;
-    return new StringSearch(pattern, target, (RuleBasedCollator) collator);
+    return new StringSearch(patternString, target, (RuleBasedCollator) collator);
+  }
+
+  /**
+   * Returns if the given collationName is valid one.
+   */
+  public static boolean isValidCollation(String collationName) {
+    return collationNameToIdMap.containsKey(collationName.toUpperCase());
+  }
+
+  /**
+   * Returns closest valid name to collationName
+   */
+  public static String getClosestCollation(String collationName) {
+    Collation suggestion = Collections.min(List.of(collationTable), Comparator.comparingInt(
+            c -> UTF8String.fromString(c.collationName).levenshteinDistance(
+                    UTF8String.fromString(collationName.toUpperCase()))));
+    return suggestion.collationName;
   }
 
   /**
