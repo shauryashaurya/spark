@@ -21,16 +21,35 @@ Run with:
   ./bin/spark-submit examples/src/main/python/sql/arrow.py
 """
 
-# NOTE that this file is imported in user guide in PySpark documentation.
+# NOTE that this file is imported in tutorials in PySpark documentation.
 # The codes are referred via line numbers. See also `literalinclude` directive in Sphinx.
 import pandas as pd
-from typing import Iterable
+from typing import Iterator
 
 from pyspark.sql import SparkSession
 from pyspark.sql.pandas.utils import require_minimum_pandas_version, require_minimum_pyarrow_version
 
 require_minimum_pandas_version()
 require_minimum_pyarrow_version()
+
+
+def dataframe_to_from_arrow_table_example(spark: SparkSession) -> None:
+    import pyarrow as pa
+    import numpy as np
+
+    # Create a PyArrow Table
+    table = pa.table([pa.array(np.random.rand(100)) for i in range(3)], names=["a", "b", "c"])
+
+    # Create a Spark DataFrame from the PyArrow Table
+    df = spark.createDataFrame(table)
+
+    # Convert the Spark DataFrame to a PyArrow Table
+    result_table = df.select("*").toArrow()
+
+    print(result_table.schema)
+    # a: double
+    # b: double
+    # c: double
 
 
 def dataframe_with_arrow_example(spark: SparkSession) -> None:
@@ -237,7 +256,7 @@ def grouped_apply_in_pandas_example(spark: SparkSession) -> None:
 def map_in_pandas_example(spark: SparkSession) -> None:
     df = spark.createDataFrame([(1, 21), (2, 30)], ("id", "age"))
 
-    def filter_func(iterator: Iterable[pd.DataFrame]) -> Iterable[pd.DataFrame]:
+    def filter_func(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         for pdf in iterator:
             yield pdf[pdf.id == 1]
 
@@ -302,6 +321,8 @@ if __name__ == "__main__":
         .appName("Python Arrow-in-Spark example") \
         .getOrCreate()
 
+    print("Running Arrow conversion example: DataFrame to Table")
+    dataframe_to_from_arrow_table_example(spark)
     print("Running Pandas to/from conversion example")
     dataframe_with_arrow_example(spark)
     print("Running pandas_udf example: Series to Frame")

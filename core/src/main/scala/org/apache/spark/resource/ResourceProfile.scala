@@ -25,8 +25,10 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.{SparkConf, SparkContext, SparkEnv, SparkException}
+import org.apache.spark.SparkMasterRegex._
 import org.apache.spark.annotation.{Evolving, Since}
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Python.PYSPARK_EXECUTOR_MEMORY
 import org.apache.spark.util.Utils
@@ -105,6 +107,14 @@ class ResourceProfile(
     executorResources.get(ResourceProfile.PYSPARK_MEM).map(_.amount)
   }
 
+  private[spark] def getOverheadMemory: Option[Long] = {
+    executorResources.get(ResourceProfile.OVERHEAD_MEM).map(_.amount)
+  }
+
+  private[spark] def getExecutorOffHeap: Option[Long] = {
+    executorResources.get(ResourceProfile.OFFHEAP_MEM).map(_.amount)
+  }
+
   private[spark] def getExecutorMemory: Option[Long] = {
     executorResources.get(ResourceProfile.MEMORY).map(_.amount)
   }
@@ -169,8 +179,8 @@ class ResourceProfile(
   // only applies to yarn/k8s
   private def shouldCheckExecutorCores(sparkConf: SparkConf): Boolean = {
     val master = sparkConf.getOption("spark.master")
-    sparkConf.contains(EXECUTOR_CORES) ||
-      (master.isDefined && (master.get.equalsIgnoreCase("yarn") || master.get.startsWith("k8s")))
+    sparkConf.contains(EXECUTOR_CORES) || isK8s(master) ||
+      (master.isDefined && master.get.equalsIgnoreCase("yarn"))
   }
 
   /**
@@ -221,8 +231,8 @@ class ResourceProfile(
         }
         taskResourcesToCheck -= rName
       } else {
-        logWarning(s"The executor resource config for resource: $rName was specified but " +
-          "no corresponding task resource request was specified.")
+        logWarning(log"The executor resource config for resource: ${MDC(RESOURCE_NAME, rName)} " +
+          log"was specified but no corresponding task resource request was specified.")
       }
     }
     if (taskResourcesToCheck.nonEmpty) {
@@ -231,7 +241,7 @@ class ResourceProfile(
     }
     val limiting =
       if (taskLimit == -1) "cpu" else s"$limitingResource at $taskLimit tasks per executor"
-    logInfo(s"Limiting resource is $limiting")
+    logInfo(log"Limiting resource is ${MDC(RESOURCE, limiting)}")
     _executorResourceSlotsPerAddr = Some(numPartsPerResourceMap.toMap)
     _maxTasksPerExecutor = if (taskLimit == -1) Some(1) else Some(taskLimit)
     _limitingResource = Some(limitingResource)
@@ -326,7 +336,7 @@ object ResourceProfile extends Logging {
    */
   val CORES = "cores"
   /**
-   * built-in executor resource: cores
+   * built-in executor resource: memory
    */
   val MEMORY = "memory"
   /**
@@ -373,9 +383,9 @@ object ResourceProfile extends Logging {
           val defProf = new ResourceProfile(executorResources, taskResources)
           defProf.setToDefaultProfile()
           defaultProfile = Some(defProf)
-          logInfo("Default ResourceProfile created, executor resources: " +
-            s"${defProf.executorResources}, task resources: " +
-            s"${defProf.taskResources}")
+          logInfo(log"Default ResourceProfile created, executor resources: " +
+            log"${MDC(EXECUTOR_RESOURCES, defProf.executorResources)}, task resources: " +
+            log"${MDC(TASK_RESOURCES, defProf.taskResources)}")
           defProf
       }
     }

@@ -115,7 +115,7 @@ class TypeConverters:
     @staticmethod
     def _can_convert_to_string(value: Any) -> bool:
         vtype = type(value)
-        return isinstance(value, str) or vtype in [np.unicode_, np.string_, np.str_]
+        return isinstance(value, str) or vtype in [np.bytes_, np.str_]
 
     @staticmethod
     def identity(value: "T") -> "T":
@@ -230,7 +230,7 @@ class TypeConverters:
         """
         if isinstance(value, str):
             return value
-        elif type(value) in [np.string_, np.str_, np.unicode_]:
+        elif type(value) in [np.bytes_, np.str_]:
             return str(value)
         else:
             raise TypeError("Could not convert %s to string type" % type(value))
@@ -255,7 +255,7 @@ class Params(Identifiable, metaclass=ABCMeta):
     """
 
     def __init__(self) -> None:
-        super(Params, self).__init__()
+        super().__init__()
         #: internal param map for user-supplied values param map
         self._paramMap: "ParamMap" = {}
 

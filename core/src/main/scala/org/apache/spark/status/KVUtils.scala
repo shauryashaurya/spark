@@ -32,6 +32,7 @@ import org.rocksdb.RocksDBException
 import org.apache.spark.SparkConf
 import org.apache.spark.deploy.history.{FsHistoryProvider, FsHistoryProviderMetadata}
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.internal.config.History
 import org.apache.spark.internal.config.History.HYBRID_STORE_DISK_BACKEND
 import org.apache.spark.internal.config.History.HybridStoreDiskBackend
@@ -73,7 +74,7 @@ private[spark] object KVUtils extends Logging {
   private[spark] class KVStoreScalaSerializer extends KVStoreSerializer {
 
     mapper.registerModule(DefaultScalaModule)
-    mapper.setSerializationInclusion(JsonInclude.Include.NON_ABSENT)
+    mapper.setDefaultPropertyInclusion(JsonInclude.Include.NON_ABSENT)
 
   }
 
@@ -154,7 +155,7 @@ private[spark] object KVUtils extends Logging {
           open(dbPath, metadata, conf, live)
         case dbExc @ (_: NativeDB.DBException | _: RocksDBException) =>
           // Get rid of the corrupted data and re-create it.
-          logWarning(s"Failed to load disk store $dbPath :", dbExc)
+          logWarning(log"Failed to load disk store ${MDC(PATH, dbPath)} :", dbExc)
           Utils.deleteRecursively(dbPath)
           open(dbPath, metadata, conf, live)
       }
@@ -209,6 +210,20 @@ private[spark] object KVUtils extends Logging {
   def mapToSeq[T, B](view: KVStoreView[T])(mapFunc: T => B): Seq[B] = {
     Utils.tryWithResource(view.closeableIterator()) { iter =>
       iter.asScala.map(mapFunc).toList
+    }
+  }
+
+  /**
+   * Maps all values of KVStoreView to new values using a transformation function
+   * and filtered by a filter function.
+   */
+  def mapToSeqWithFilter[T, B](
+      view: KVStoreView[T],
+      max: Int)
+      (mapFunc: T => B)
+      (filterFunc: B => Boolean): Seq[B] = {
+    Utils.tryWithResource(view.closeableIterator()) { iter =>
+      iter.asScala.map(mapFunc).filter(filterFunc).take(max).toList
     }
   }
 

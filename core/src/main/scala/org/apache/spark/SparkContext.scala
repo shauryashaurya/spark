@@ -27,6 +27,7 @@ import scala.collection.Map
 import scala.collection.concurrent.{Map => ScalaConcurrentMap}
 import scala.collection.immutable
 import scala.collection.mutable.HashMap
+import scala.concurrent.{Future, Promise}
 import scala.jdk.CollectionConverters._
 import scala.reflect.{classTag, ClassTag}
 import scala.util.control.NonFatal
@@ -45,14 +46,14 @@ import org.apache.spark.deploy.{LocalSparkCluster, SparkHadoopUtil}
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.{Executor, ExecutorMetrics, ExecutorMetricsSource}
 import org.apache.spark.input.{FixedLengthBinaryInputFormat, PortableDataStream, StreamInputFormat, WholeTextFileInputFormat}
-import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.Logging
 import org.apache.spark.internal.LogKeys
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Tests._
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.internal.plugin.PluginContainer
 import org.apache.spark.io.CompressionCodec
-import org.apache.spark.launcher.JavaModuleOptions
+import org.apache.spark.launcher.{JavaModuleOptions, SparkLauncher}
 import org.apache.spark.metrics.source.JVMCPUSource
 import org.apache.spark.partial.{ApproximateEvaluator, PartialResult}
 import org.apache.spark.rdd._
@@ -199,10 +200,11 @@ class SparkContext(config: SparkConf) extends Logging {
     this(master, appName, sparkHome, jars, Map())
 
   // log out Spark Version in Spark driver log
-  logInfo(s"Running Spark version $SPARK_VERSION")
-  logInfo(s"OS info ${System.getProperty("os.name")}, ${System.getProperty("os.version")}, " +
-    s"${System.getProperty("os.arch")}")
-  logInfo(s"Java version ${System.getProperty("java.version")}")
+  logInfo(log"Running Spark version ${MDC(LogKeys.SPARK_VERSION, SPARK_VERSION)}")
+  logInfo(log"OS info ${MDC(LogKeys.OS_NAME, Utils.osName)}," +
+    log" ${MDC(LogKeys.OS_VERSION, Utils.osVersion)}, " +
+    log"${MDC(LogKeys.OS_ARCH, Utils.osArch)}")
+  logInfo(log"Java version ${MDC(LogKeys.JAVA_VERSION, Utils.javaVersion)}")
 
   /* ------------------------------------------------------------------------------------- *
    | Private variables. These variables keep the internal state of the context, and are    |
@@ -250,6 +252,9 @@ class SparkContext(config: SparkConf) extends Logging {
 
   private[spark] def conf: SparkConf = _conf
 
+  /** Get a read-only reference to the spark conf. This is preferred version over [[getConf]]. */
+  def getReadOnlyConf: ReadOnlySparkConf = _conf
+
   /**
    * Return a copy of this SparkContext's configuration. The configuration ''cannot'' be
    * changed at runtime.
@@ -286,12 +291,7 @@ class SparkContext(config: SparkConf) extends Logging {
       conf: SparkConf,
       isLocal: Boolean,
       listenerBus: LiveListenerBus): SparkEnv = {
-    SparkEnv.createDriverEnv(
-      conf,
-      isLocal,
-      listenerBus,
-      SparkContext.numDriverCores(master, conf),
-      this)
+    SparkEnv.createDriverEnv(conf, isLocal, listenerBus, SparkContext.numDriverCores(master, conf))
   }
 
   private[spark] def env: SparkEnv = _env
@@ -423,11 +423,12 @@ class SparkContext(config: SparkConf) extends Logging {
     if (!_conf.contains("spark.app.name")) {
       throw new SparkException("An application name must be set in your configuration")
     }
-    // HADOOP-19097 Set fs.s3a.connection.establish.timeout to 30s
-    // We can remove this after Apache Hadoop 3.4.1 releases
-    conf.setIfMissing("spark.hadoop.fs.s3a.connection.establish.timeout", "30s")
+    // HADOOP-19229 Vector IO on cloud storage: increase threshold for range merging
+    // We can remove this after Apache Hadoop 3.4.2 releases
+    conf.setIfMissing("spark.hadoop.fs.s3a.vectored.read.min.seek.size", "128K")
+    conf.setIfMissing("spark.hadoop.fs.s3a.vectored.read.max.merged.size", "2M")
     // This should be set as early as possible.
-    SparkContext.fillMissingMagicCommitterConfsIfNeeded(_conf)
+    SparkContext.enableMagicCommitterIfNeeded(_conf)
 
     SparkContext.supplementJavaModuleOptions(_conf)
     SparkContext.supplementJavaIPv6Options(_conf)
@@ -439,7 +440,7 @@ class SparkContext(config: SparkConf) extends Logging {
     logResourceInfo(SPARK_DRIVER_PREFIX, _resources)
 
     // log out spark.app.name in the Spark driver logs
-    logInfo(s"Submitted application: $appName")
+    logInfo(log"Submitted application: ${MDC(LogKeys.APP_NAME, appName)}")
 
     // System property spark.yarn.app.id must be set if user code ran by AM on a YARN cluster
     if (master == "yarn" && deployMode == "cluster" && !_conf.contains("spark.yarn.app.id")) {
@@ -448,12 +449,19 @@ class SparkContext(config: SparkConf) extends Logging {
     }
 
     if (_conf.getBoolean("spark.logConf", false)) {
-      logInfo("Spark configuration:\n" + _conf.toDebugString)
+      logInfo(log"Spark configuration:\n${MDC(LogKeys.CONFIG, _conf.toDebugString)}")
     }
 
     // Set Spark driver host and port system properties. This explicitly sets the configuration
     // instead of relying on the default value of the config constant.
-    _conf.set(DRIVER_HOST_ADDRESS, _conf.get(DRIVER_HOST_ADDRESS))
+    if (SparkMasterRegex.isK8s(master) &&
+        _conf.getBoolean("spark.kubernetes.executor.useDriverPodIP", false)) {
+      logInfo("Use DRIVER_BIND_ADDRESS instead of DRIVER_HOST_ADDRESS as driver address " +
+        "because spark.kubernetes.executor.useDriverPodIP is true in K8s mode.")
+      _conf.set(DRIVER_HOST_ADDRESS, _conf.get(DRIVER_BIND_ADDRESS))
+    } else {
+      _conf.set(DRIVER_HOST_ADDRESS, _conf.get(DRIVER_HOST_ADDRESS))
+    }
     _conf.setIfMissing(DRIVER_PORT, 0)
 
     _conf.set(EXECUTOR_ID, SparkContext.DRIVER_IDENTIFIER)
@@ -482,7 +490,6 @@ class SparkContext(config: SparkConf) extends Logging {
     }
 
     _listenerBus = new LiveListenerBus(_conf)
-    _resourceProfileManager = new ResourceProfileManager(_conf, _listenerBus)
 
     // Initialize the app status store and listener before SparkEnv is created so that it gets
     // all events.
@@ -583,8 +590,9 @@ class SparkContext(config: SparkConf) extends Logging {
     _heartbeatReceiver = env.rpcEnv.setupEndpoint(
       HeartbeatReceiver.ENDPOINT_NAME, new HeartbeatReceiver(this))
 
-    // Initialize any plugins before the task scheduler is initialized.
+    // Initialize any plugins before initializing the task scheduler and resource profile manager.
     _plugins = PluginContainer(this, _resources.asJava)
+    _resourceProfileManager = new ResourceProfileManager(_conf, _listenerBus)
     _env.initializeShuffleManager()
     _env.initializeMemoryManager(SparkContext.numDriverCores(master, conf))
 
@@ -600,6 +608,8 @@ class SparkContext(config: SparkConf) extends Logging {
         .foreach(logLevel => _schedulerBackend.updateExecutorsLogLevel(logLevel))
     }
 
+    _conf.get(CHECKPOINT_DIR).foreach(setCheckpointDir)
+
     val _executorMetricsSource =
       if (_conf.get(METRICS_EXECUTORMETRICS_SOURCE_ENABLED)) {
         Some(new ExecutorMetricsSource)
@@ -611,7 +621,7 @@ class SparkContext(config: SparkConf) extends Logging {
     _heartbeater = new Heartbeater(
       () => SparkContext.this.reportHeartBeat(_executorMetricsSource),
       "driver-heartbeater",
-      conf.get(EXECUTOR_HEARTBEAT_INTERVAL))
+      conf.get(DRIVER_METRICS_POLLING_INTERVAL))
     _heartbeater.start()
 
     // start TaskScheduler after taskScheduler sets DAGScheduler reference in DAGScheduler's
@@ -638,7 +648,8 @@ class SparkContext(config: SparkConf) extends Logging {
     }
     _ui.foreach(_.setAppId(_applicationId))
     _env.blockManager.initialize(_applicationId)
-    FallbackStorage.registerBlockManagerIfNeeded(_env.blockManager.master, _conf)
+    FallbackStorage.registerBlockManagerIfNeeded(
+      _env.blockManager.master, _conf, _hadoopConfiguration)
 
     // The metrics system for Driver need to be set spark.app.id to app ID.
     // So it should start after we get app ID from the task scheduler and set spark.app.id.
@@ -719,6 +730,9 @@ class SparkContext(config: SparkConf) extends Logging {
     }
     appStatusSource.foreach(_env.metricsSystem.registerSource(_))
     _plugins.foreach(_.registerMetrics(applicationId))
+
+    new CallerContext("DRIVER", config.get(APP_CALLER_CONTEXT),
+      Some(applicationId), applicationAttemptId).setCurrentContext()
   } catch {
     case NonFatal(e) =>
       logError("Error initializing SparkContext.", e)
@@ -747,8 +761,8 @@ class SparkContext(config: SparkConf) extends Logging {
           case Some(endpointRef) =>
             Some(endpointRef.askSync[Array[ThreadStackTrace]](TriggerThreadDump))
           case None =>
-            logWarning(s"Executor $executorId might already have stopped and " +
-              "can not request thread dump from it.")
+            logWarning(log"Executor ${MDC(LogKeys.EXECUTOR_ID, executorId)} " +
+              log"might already have stopped and can not request thread dump from it.")
             None
         }
       }
@@ -779,8 +793,8 @@ class SparkContext(config: SparkConf) extends Logging {
           case Some(endpointRef) =>
             Some(endpointRef.askSync[Array[String]](TriggerHeapHistogram))
           case None =>
-            logWarning(s"Executor $executorId might already have stopped and " +
-              "can not request heap histogram from it.")
+            logWarning(log"Executor ${MDC(LogKeys.EXECUTOR_ID, executorId)} " +
+              log"might already have stopped and can not request heap histogram from it.")
             None
         }
       }
@@ -911,10 +925,20 @@ class SparkContext(config: SparkConf) extends Logging {
    *
    * @since 3.5.0
    */
-  def addJobTag(tag: String): Unit = {
-    SparkContext.throwIfInvalidTag(tag)
+  def addJobTag(tag: String): Unit = addJobTags(Set(tag))
+
+  /**
+   * Add multiple tags to be assigned to all the jobs started by this thread.
+   * See [[addJobTag]] for more details.
+   *
+   * @param tags The tags to be added. Cannot contain ',' (comma) character.
+   *
+   * @since 4.0.0
+   */
+  def addJobTags(tags: Set[String]): Unit = {
+    tags.foreach(SparkContext.throwIfInvalidTag)
     val existingTags = getJobTags()
-    val newTags = (existingTags + tag).mkString(SparkContext.SPARK_JOB_TAGS_SEP)
+    val newTags = (existingTags ++ tags).mkString(SparkContext.SPARK_JOB_TAGS_SEP)
     setLocalProperty(SparkContext.SPARK_JOB_TAGS, newTags)
   }
 
@@ -926,10 +950,20 @@ class SparkContext(config: SparkConf) extends Logging {
    *
    * @since 3.5.0
    */
-  def removeJobTag(tag: String): Unit = {
-    SparkContext.throwIfInvalidTag(tag)
+  def removeJobTag(tag: String): Unit = removeJobTags(Set(tag))
+
+  /**
+   * Remove multiple tags to be assigned to all the jobs started by this thread.
+   * See [[removeJobTag]] for more details.
+   *
+   * @param tags The tags to be removed. Cannot contain ',' (comma) character.
+   *
+   * @since 4.0.0
+   */
+  def removeJobTags(tags: Set[String]): Unit = {
+    tags.foreach(SparkContext.throwIfInvalidTag)
     val existingTags = getJobTags()
-    val newTags = (existingTags - tag).mkString(SparkContext.SPARK_JOB_TAGS_SEP)
+    val newTags = (existingTags -- tags).mkString(SparkContext.SPARK_JOB_TAGS_SEP)
     if (newTags.isEmpty) {
       clearJobTags()
     } else {
@@ -1704,7 +1738,8 @@ class SparkContext(config: SparkConf) extends Logging {
       "Can not directly broadcast RDDs; instead, call collect() and broadcast the result.")
     val bc = env.broadcastManager.newBroadcast[T](value, isLocal, serializedOnly)
     val callSite = getCallSite()
-    logInfo("Created broadcast " + bc.id + " from " + callSite.shortForm)
+    logInfo(log"Created broadcast ${MDC(LogKeys.BROADCAST_ID, bc.id)}" +
+      log" from ${MDC(LogKeys.CALL_SITE_SHORT_FORM, callSite.shortForm)}")
     cleaner.foreach(_.registerBroadcastForCleanup(bc))
     bc
   }
@@ -1785,8 +1820,9 @@ class SparkContext(config: SparkConf) extends Logging {
     val schemeCorrectedURI = uri.getScheme match {
       case null => new File(path).getCanonicalFile.toURI
       case "local" =>
-        logWarning(s"File with 'local' scheme $path is not supported to add to file server, " +
-          s"since it is already available on every node.")
+        logWarning(log"File with 'local' scheme ${MDC(LogKeys.PATH, path)} " +
+          log"is not supported to add to file server, " +
+          log"since it is already available on every node.")
         return
       case _ => uri
     }
@@ -1832,7 +1868,8 @@ class SparkContext(config: SparkConf) extends Logging {
         addedFiles
           .getOrElseUpdate(jobArtifactUUID, new ConcurrentHashMap[String, Long]().asScala)
           .putIfAbsent(key, timestamp).isEmpty) {
-      logInfo(s"Added file $path at $key with timestamp $timestamp")
+      logInfo(log"Added file ${MDC(LogKeys.PATH, path)} at ${MDC(LogKeys.KEY, key)} with" +
+        log" timestamp ${MDC(LogKeys.TIMESTAMP, timestamp)}")
       // Fetch the file locally so that closures which are run on the driver can still use the
       // SparkFiles API to access files.
       Utils.fetchFile(uri.toString, root, conf, hadoopConfiguration, timestamp, useCache = false)
@@ -1844,7 +1881,8 @@ class SparkContext(config: SparkConf) extends Logging {
           .putIfAbsent(
           Utils.getUriBuilder(new URI(key)).fragment(uri.getFragment).build().toString,
           timestamp).isEmpty) {
-      logInfo(s"Added archive $path at $key with timestamp $timestamp")
+      logInfo(log"Added archive ${MDC(LogKeys.PATH, path)} at ${MDC(LogKeys.KEY, key)}" +
+        log" with timestamp ${MDC(LogKeys.TIMESTAMP, timestamp)}")
       // If the scheme is file, use URI to simply copy instead of downloading.
       val uriToUse = if (!isLocal && scheme == "file") uri else new URI(key)
       val uriToDownload = Utils.getUriBuilder(uriToUse).fragment(null).build()
@@ -1854,13 +1892,17 @@ class SparkContext(config: SparkConf) extends Logging {
         root,
         if (uri.getFragment != null) uri.getFragment else source.getName)
       logInfo(
-        s"Unpacking an archive $path from ${source.getAbsolutePath} to ${dest.getAbsolutePath}")
+        log"Unpacking an archive ${MDC(LogKeys.PATH, path)}" +
+          log" (${MDC(LogKeys.BYTE_SIZE, source.length)} bytes)" +
+          log" from ${MDC(LogKeys.SOURCE_PATH, source.getAbsolutePath)}" +
+          log" to ${MDC(LogKeys.DESTINATION_PATH, dest.getAbsolutePath)}")
       Utils.deleteRecursively(dest)
       Utils.unpack(source, dest)
       postEnvironmentUpdate()
     } else {
-      logWarning(s"The path $path has been added already. Overwriting of added paths " +
-        "is not supported in the current version.")
+      logWarning(log"The path ${MDC(LogKeys.PATH, path)} " +
+        log"has been added already. Overwriting of added paths " +
+        log"is not supported in the current version.")
     }
   }
 
@@ -2214,14 +2256,21 @@ class SparkContext(config: SparkConf) extends Logging {
           .getOrElseUpdate(jobArtifactUUID, new ConcurrentHashMap[String, Long]().asScala)
           .putIfAbsent(_, timestamp).isEmpty)
         if (added.nonEmpty) {
-          val jarMessage = if (scheme != "ivy") "JAR" else "dependency jars of Ivy URI"
-          logInfo(s"Added $jarMessage $path at ${added.mkString(",")} with timestamp $timestamp")
+          val jarMessage = if (scheme != "ivy") {
+            log"Added JAR"
+          } else {
+            log"Added dependency jars of Ivy URI"
+          }
+          logInfo(jarMessage + log" ${MDC(LogKeys.PATH, path)}" +
+            log" at ${MDC(LogKeys.ADDED_JARS, added.mkString(","))}" +
+            log" with timestamp ${MDC(LogKeys.TIMESTAMP, timestamp)}")
           postEnvironmentUpdate()
         }
         if (existed.nonEmpty) {
           val jarMessage = if (scheme != "ivy") "JAR" else "dependency jars of Ivy URI"
-          logWarning(s"The $jarMessage $path at ${existed.mkString(",")} has been added already." +
-            " Overwriting of added jar is not supported in the current version.")
+          logWarning(log"The ${MDC(LogKeys.JAR_MESSAGE, jarMessage)} ${MDC(LogKeys.PATH, path)} " +
+            log"at ${MDC(LogKeys.EXISTING_PATH, existed.mkString(","))} has been added already." +
+            log" Overwriting of added jar is not supported in the current version.")
         }
       }
     }
@@ -2271,7 +2320,8 @@ class SparkContext(config: SparkConf) extends Logging {
    */
   def stop(exitCode: Int): Unit = {
     stopSite = Some(getCallSite())
-    logInfo(s"SparkContext is stopping with exitCode $exitCode from ${stopSite.get.shortForm}.")
+    logInfo(log"SparkContext is stopping with exitCode ${MDC(LogKeys.EXIT_CODE, exitCode)}" +
+      log" from ${MDC(LogKeys.STOP_SITE_SHORT_FORM, stopSite.get.shortForm)}.")
     if (LiveListenerBus.withinListenerThread.value) {
       throw new SparkException(s"Cannot stop SparkContext within listener bus thread.")
     }
@@ -2308,6 +2358,11 @@ class SparkContext(config: SparkConf) extends Logging {
       }
       _dagScheduler = null
     }
+    // In case there are still events being posted during the shutdown of plugins,
+    // invoke the shutdown of each plugin before the listenerBus is stopped.
+    Utils.tryLogNonFatalError {
+      _plugins.foreach(_.shutdown())
+    }
     if (_listenerBusStarted) {
       Utils.tryLogNonFatalError {
         listenerBus.stop()
@@ -2318,9 +2373,6 @@ class SparkContext(config: SparkConf) extends Logging {
       Utils.tryLogNonFatalError {
         env.metricsSystem.report()
       }
-    }
-    Utils.tryLogNonFatalError {
-      _plugins.foreach(_.shutdown())
     }
     Utils.tryLogNonFatalError {
       FallbackStorage.cleanUp(_conf, _hadoopConfiguration)
@@ -2364,7 +2416,8 @@ class SparkContext(config: SparkConf) extends Logging {
     ResourceProfile.clearDefaultProfile()
     // Unset YARN mode system env variable, to allow switching between cluster types.
     SparkContext.clearActiveContext()
-    logInfo("Successfully stopped SparkContext")
+    logInfo(log"Successfully stopped SparkContext (Uptime: " +
+      log"${MDC(LogKeys.TOTAL_TIME, System.currentTimeMillis() - startTime)} ms)")
   }
 
 
@@ -2435,9 +2488,10 @@ class SparkContext(config: SparkConf) extends Logging {
     }
     val callSite = getCallSite()
     val cleanedFunc = clean(func)
-    logInfo("Starting job: " + callSite.shortForm)
+    logInfo(log"Starting job: ${MDC(LogKeys.CALL_SITE_SHORT_FORM, callSite.shortForm)}")
     if (conf.getBoolean("spark.logLineage", false)) {
-      logInfo("RDD's recursive dependencies:\n" + rdd.toDebugString)
+      logInfo(log"RDD's recursive dependencies:\n" +
+        log"${MDC(LogKeys.RDD_DEBUG_STRING, rdd.toDebugString)}")
     }
     dagScheduler.runJob(rdd, cleanedFunc, partitions, callSite, resultHandler, localProperties.get)
     progressBar.foreach(_.finishAll())
@@ -2556,13 +2610,14 @@ class SparkContext(config: SparkConf) extends Logging {
       timeout: Long): PartialResult[R] = {
     assertNotStopped()
     val callSite = getCallSite()
-    logInfo("Starting job: " + callSite.shortForm)
-    val start = System.nanoTime
+    logInfo(log"Starting job: ${MDC(LogKeys.CALL_SITE_SHORT_FORM, callSite.shortForm)}")
+    val start = System.currentTimeMillis()
     val cleanedFunc = clean(func)
     val result = dagScheduler.runApproximateJob(rdd, cleanedFunc, evaluator, callSite, timeout,
       localProperties.get)
     logInfo(
-      "Job finished: " + callSite.shortForm + ", took " + (System.nanoTime - start) / 1e9 + " s")
+      log"Job finished: ${MDC(LogKeys.CALL_SITE_SHORT_FORM, callSite.shortForm)}," +
+        log" took ${MDC(LogKeys.TOTAL_TIME, System.currentTimeMillis() - start)}ms")
     result
   }
 
@@ -2616,10 +2671,26 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Cancel active jobs for the specified group. See `org.apache.spark.SparkContext.setJobGroup`
    * for more information.
+   *
+   * @param groupId the group ID to cancel
+   * @param reason reason for cancellation
+   *
+   * @since 4.0.0
+   */
+  def cancelJobGroup(groupId: String, reason: String): Unit = {
+    assertNotStopped()
+    dagScheduler.cancelJobGroup(groupId, cancelFutureJobs = false, Option(reason))
+  }
+
+  /**
+   * Cancel active jobs for the specified group. See `org.apache.spark.SparkContext.setJobGroup`
+   * for more information.
+   *
+   * @param groupId the group ID to cancel
    */
   def cancelJobGroup(groupId: String): Unit = {
     assertNotStopped()
-    dagScheduler.cancelJobGroup(groupId)
+    dagScheduler.cancelJobGroup(groupId, cancelFutureJobs = false, None)
   }
 
   /**
@@ -2627,10 +2698,61 @@ class SparkContext(config: SparkConf) extends Logging {
    * Note: the maximum number of job groups that can be tracked is set by
    * 'spark.scheduler.numCancelledJobGroupsToTrack'. Once the limit is reached and a new job group
    * is to be added, the oldest job group tracked will be discarded.
+   *
+   * @param groupId the group ID to cancel
+   * @param reason reason for cancellation
+   *
+   * @since 4.0.0
+   */
+  def cancelJobGroupAndFutureJobs(groupId: String, reason: String): Unit = {
+    assertNotStopped()
+    dagScheduler.cancelJobGroup(groupId, cancelFutureJobs = true, Option(reason))
+  }
+
+  /**
+   * Cancel active jobs for the specified group, as well as the future jobs in this job group.
+   * Note: the maximum number of job groups that can be tracked is set by
+   * 'spark.scheduler.numCancelledJobGroupsToTrack'. Once the limit is reached and a new job group
+   * is to be added, the oldest job group tracked will be discarded.
+   *
+   * @param groupId the group ID to cancel
    */
   def cancelJobGroupAndFutureJobs(groupId: String): Unit = {
     assertNotStopped()
-    dagScheduler.cancelJobGroup(groupId, cancelFutureJobs = true)
+    dagScheduler.cancelJobGroup(groupId, cancelFutureJobs = true, None)
+  }
+
+  /**
+   * Cancel active jobs that have the specified tag. See `org.apache.spark.SparkContext.addJobTag`.
+   *
+   * @param tag The tag to be cancelled. Cannot contain ',' (comma) character.
+   * @param reason reason for cancellation.
+   * @return A future with [[ActiveJob]]s, allowing extraction of information such as Job ID and
+   *   tags.
+   */
+  private[spark] def cancelJobsWithTagWithFuture(
+      tag: String,
+      reason: String): Future[Seq[ActiveJob]] = {
+    SparkContext.throwIfInvalidTag(tag)
+    assertNotStopped()
+
+    val cancelledJobs = Promise[Seq[ActiveJob]]()
+    dagScheduler.cancelJobsWithTag(tag, Some(reason), Some(cancelledJobs))
+    cancelledJobs.future
+  }
+
+  /**
+   * Cancel active jobs that have the specified tag. See `org.apache.spark.SparkContext.addJobTag`.
+   *
+   * @param tag The tag to be cancelled. Cannot contain ',' (comma) character.
+   * @param reason reason for cancellation
+   *
+   * @since 4.0.0
+   */
+  def cancelJobsWithTag(tag: String, reason: String): Unit = {
+    SparkContext.throwIfInvalidTag(tag)
+    assertNotStopped()
+    dagScheduler.cancelJobsWithTag(tag, Option(reason), cancelledJobs = None)
   }
 
   /**
@@ -2643,7 +2765,7 @@ class SparkContext(config: SparkConf) extends Logging {
   def cancelJobsWithTag(tag: String): Unit = {
     SparkContext.throwIfInvalidTag(tag)
     assertNotStopped()
-    dagScheduler.cancelJobsWithTag(tag)
+    dagScheduler.cancelJobsWithTag(tag, reason = None, cancelledJobs = None)
   }
 
   /** Cancel all jobs that have been scheduled or are running.  */
@@ -2656,7 +2778,7 @@ class SparkContext(config: SparkConf) extends Logging {
    * Cancel a given job if it's scheduled or running.
    *
    * @param jobId the job ID to cancel
-   * @param reason optional reason for cancellation
+   * @param reason reason for cancellation
    * @note Throws `InterruptedException` if the cancel message cannot be sent
    */
   def cancelJob(jobId: Int, reason: String): Unit = {
@@ -2742,9 +2864,9 @@ class SparkContext(config: SparkConf) extends Logging {
     // its own local file system, which is incorrect because the checkpoint files
     // are actually on the executor machines.
     if (!isLocal && Utils.nonLocalPaths(directory).isEmpty) {
-      logWarning("Spark is not running in local mode, therefore the checkpoint directory " +
-        s"must not be on the local filesystem. Directory '$directory' " +
-        "appears to be on the local filesystem.")
+      logWarning(log"Spark is not running in local mode, therefore the checkpoint directory " +
+        log"must not be on the local filesystem. Directory '${MDC(LogKeys.PATH, directory)}' " +
+        log"appears to be on the local filesystem.")
     }
 
     checkpointDir = Option(directory).map { dir =>
@@ -2766,7 +2888,10 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Default min number of partitions for Hadoop RDDs when not given by user
    * Notice that we use math.min so the "defaultMinPartitions" cannot be higher than 2.
-   * The reasons for this are discussed in https://github.com/mesos/spark/pull/718
+   * For large files, the Hadoop InputFormat library always creates more partitions even though
+   * defaultMinPartitions is 2. For small files, it can be good to process small files quickly.
+   * However, usually when Spark joins a small table with a big one, we'll still spend most of
+   * time on the map part of the big one anyway.
    */
   def defaultMinPartitions: Int = math.min(defaultParallelism, 2)
 
@@ -2790,7 +2915,8 @@ class SparkContext(config: SparkConf) extends Logging {
         val listeners = Utils.loadExtensions(classOf[SparkListenerInterface], classNames, conf)
         listeners.foreach { listener =>
           listenerBus.addToSharedQueue(listener)
-          logInfo(s"Registered listener ${listener.getClass().getName()}")
+          logInfo(log"Registered listener" +
+            log"${MDC(LogKeys.CLASS_NAME, listener.getClass().getName())}")
         }
       }
     } catch {
@@ -2816,13 +2942,19 @@ class SparkContext(config: SparkConf) extends Logging {
     _driverLogger.foreach(_.startSync(_hadoopConfiguration))
   }
 
-  /** Post the application end event */
+  /** Post the application end event and report the final heartbeat */
   private def postApplicationEnd(exitCode: Int): Unit = {
+    try {
+      _heartbeater.doReportHeartbeat()
+    } catch {
+      case t: Throwable =>
+        logInfo("Unable to report driver heartbeat metrics when stopping spark context", t);
+    }
     listenerBus.post(SparkListenerApplicationEnd(System.currentTimeMillis, Some(exitCode)))
   }
 
   /** Post the environment update event once the task scheduler is ready */
-  private def postEnvironmentUpdate(): Unit = {
+  private[spark] def postEnvironmentUpdate(): Unit = {
     if (taskScheduler != null) {
       val schedulingMode = getSchedulingMode.toString
       val addedJarPaths = allAddedJars.keys.toSeq
@@ -2905,10 +3037,11 @@ object SparkContext extends Logging {
         // its creationSite field being null:
         val otherContextCreationSite =
           Option(otherContext.creationSite).map(_.longForm).getOrElse("unknown location")
-        val warnMsg = "Another SparkContext is being constructed (or threw an exception in its" +
-          " constructor). This may indicate an error, since only one SparkContext should be" +
-          " running in this JVM (see SPARK-2243)." +
-          s" The other SparkContext was created at:\n$otherContextCreationSite"
+        val warnMsg = log"Another SparkContext is being constructed (or threw an exception in its" +
+          log" constructor). This may indicate an error, since only one SparkContext should be" +
+          log" running in this JVM (see SPARK-2243)." +
+          log" The other SparkContext was created at:\n" +
+          log"${MDC(LogKeys.CREATION_SITE, otherContextCreationSite)}"
         logWarning(warnMsg)
       }
     }
@@ -3270,15 +3403,11 @@ object SparkContext extends Logging {
   }
 
   /**
-   * This is a helper function to complete the missing S3A magic committer configurations
-   * based on a single conf: `spark.hadoop.fs.s3a.bucket.<bucket>.committer.magic.enabled`
+   * Enable Magic Committer by default for all S3 buckets if hadoop-cloud module exists.
    */
-  private def fillMissingMagicCommitterConfsIfNeeded(conf: SparkConf): Unit = {
-    val magicCommitterConfs = conf
-      .getAllWithPrefix("spark.hadoop.fs.s3a.bucket.")
-      .filter(_._1.endsWith(".committer.magic.enabled"))
-      .filter(_._2.equalsIgnoreCase("true"))
-    if (magicCommitterConfs.nonEmpty) {
+  private def enableMagicCommitterIfNeeded(conf: SparkConf): Unit = {
+    if (Utils.classIsLoadable("org.apache.spark.internal.io.cloud.BindingParquetOutputCommitter") &&
+        Utils.classIsLoadable("org.apache.spark.internal.io.cloud.PathOutputCommitProtocol")) {
       // Try to enable S3 magic committer if missing
       conf.setIfMissing("spark.hadoop.fs.s3a.committer.magic.enabled", "true")
       if (conf.get("spark.hadoop.fs.s3a.committer.magic.enabled").equals("true")) {
@@ -3298,27 +3427,21 @@ object SparkContext extends Logging {
    * `spark.driver.extraJavaOptions` and `spark.executor.extraJavaOptions`.
    */
   private def supplementJavaModuleOptions(conf: SparkConf): Unit = {
-    def supplement(key: OptionalConfigEntry[String]): Unit = {
-      val v = conf.get(key) match {
-        case Some(opts) => s"${JavaModuleOptions.defaultModuleOptions()} $opts"
-        case None => JavaModuleOptions.defaultModuleOptions()
-      }
-      conf.set(key.key, v)
+    def supplement(key: String): Unit = {
+      val v = s"${JavaModuleOptions.defaultModuleOptions()} ${conf.get(key, "")}".trim()
+      conf.set(key, v)
     }
-    supplement(DRIVER_JAVA_OPTIONS)
-    supplement(EXECUTOR_JAVA_OPTIONS)
+    supplement(SparkLauncher.DRIVER_EXTRA_JAVA_OPTIONS)
+    supplement(SparkLauncher.EXECUTOR_EXTRA_JAVA_OPTIONS)
   }
 
   private def supplementJavaIPv6Options(conf: SparkConf): Unit = {
-    def supplement(key: OptionalConfigEntry[String]): Unit = {
-      val v = conf.get(key) match {
-        case Some(opts) => s"-Djava.net.preferIPv6Addresses=${Utils.preferIPv6} $opts"
-        case None => s"-Djava.net.preferIPv6Addresses=${Utils.preferIPv6}"
-      }
-      conf.set(key.key, v)
+    def supplement(key: String): Unit = {
+      val v = s"-Djava.net.preferIPv6Addresses=${Utils.preferIPv6} ${conf.get(key, "")}".trim()
+      conf.set(key, v)
     }
-    supplement(DRIVER_JAVA_OPTIONS)
-    supplement(EXECUTOR_JAVA_OPTIONS)
+    supplement(SparkLauncher.DRIVER_EXTRA_JAVA_OPTIONS)
+    supplement(SparkLauncher.EXECUTOR_EXTRA_JAVA_OPTIONS)
   }
 }
 
@@ -3336,6 +3459,15 @@ private object SparkMasterRegex {
   val SPARK_REGEX = """spark://(.*)""".r
   // Regular expression for connecting to kubernetes clusters
   val KUBERNETES_REGEX = """k8s://(.*)""".r
+
+  def isK8s(master: String) : Boolean = isK8s(Option(master))
+
+  def isK8s(master: Option[String]) : Boolean = {
+    master match {
+      case Some(KUBERNETES_REGEX(_)) => true
+      case _ => false
+    }
+  }
 }
 
 /**

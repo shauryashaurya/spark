@@ -22,6 +22,7 @@ import scala.util.Random
 
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys._
 
 /**
  * ::DeveloperApi::
@@ -120,7 +121,8 @@ class RandomBlockReplicationPolicy
       BlockReplicationUtils.getRandomSample(peers, numReplicas, random)
     } else {
       if (peers.size < numReplicas) {
-        logWarning(s"Expecting ${numReplicas} replicas with only ${peers.size} peer/s.")
+        logWarning(log"Expecting ${MDC(NUM_REPLICAS, numReplicas)} " +
+          log"replicas with only ${MDC(NUM_PEERS, peers.size)} peer/s.")
       }
       random.shuffle(peers).toList
     }

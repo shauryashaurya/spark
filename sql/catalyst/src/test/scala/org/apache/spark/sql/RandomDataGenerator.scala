@@ -19,7 +19,7 @@ package org.apache.spark.sql
 
 import java.math.MathContext
 import java.sql.{Date, Timestamp}
-import java.time.{Duration, Instant, LocalDate, LocalDateTime, Period, ZoneId}
+import java.time.{Duration, Instant, LocalDate, LocalDateTime, LocalTime, Period, ZoneId}
 import java.time.temporal.ChronoUnit
 
 import scala.collection.mutable
@@ -53,9 +53,12 @@ object RandomDataGenerator {
    */
   private val PROBABILITY_OF_NULL: Float = 0.1f
 
-  final val MAX_STR_LEN: Int = 1024
-  final val MAX_ARR_SIZE: Int = 128
-  final val MAX_MAP_SIZE: Int = 128
+  final val MAX_STR_LEN: Int =
+    System.getProperty("spark.sql.test.randomDataGenerator.maxStrLen", "1024").toInt
+  final val MAX_ARR_SIZE: Int =
+    System.getProperty("spark.sql.test.randomDataGenerator.maxArraySize", "128").toInt
+  final val MAX_MAP_SIZE: Int =
+    System.getProperty("spark.sql.test.randomDataGenerator.maxMapSize", "128").toInt
 
   /**
    * Helper function for constructing a biased random number generator which returns "interesting"
@@ -280,6 +283,18 @@ object RandomDataGenerator {
             DateTimeUtils.microsToLocalDateTime(uniformMicrosRand(rand))
           },
           specialTs.map { s => LocalDateTime.parse(s.replace(" ", "T")) }
+        )
+      case _: TimeType =>
+        val specialTimes = Seq(
+          "00:00:00",
+          "23:59:59.999999"
+        )
+        randomNumeric[LocalTime](
+          rand,
+          (rand: Random) => {
+            DateTimeUtils.nanosToLocalTime(rand.between(0, 24 * 60 * 60 * 1000 * 1000L) * 1000L)
+          },
+          specialTimes.map(LocalTime.parse)
         )
       case CalendarIntervalType => Some(() => {
         val months = rand.nextInt(1000)

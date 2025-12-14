@@ -23,8 +23,8 @@ import jakarta.servlet.http.{HttpServlet, HttpServletRequest, HttpServletRespons
 import org.eclipse.jetty.servlet.ServletContextHandler
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkContext}
-import org.apache.spark.internal.{Logging, MDC}
-import org.apache.spark.internal.LogKeys.CLASS_NAME
+import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.{CLASS_NAME, WEB_URL}
 import org.apache.spark.internal.config.DRIVER_LOG_LOCAL_DIR
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler._
@@ -164,7 +164,7 @@ private[spark] class SparkUI private (
   /** Stop the server behind this web interface. Only valid after bind(). */
   override def stop(): Unit = {
     super.stop()
-    logInfo(s"Stopped Spark web UI at $webUrl")
+    logInfo(log"Stopped Spark web UI at ${MDC(WEB_URL, webUrl)}")
   }
 
   override def withSparkUI[T](appId: String, attemptId: Option[String])(fn: SparkUI => T): T = {
@@ -199,6 +199,11 @@ private[spark] class SparkUI private (
         appSparkVersion = appSparkVersion
       ))
     ))
+  }
+
+  override def getApplicationInfoList(max: Int)(
+      filter: ApplicationInfo => Boolean): Iterator[ApplicationInfo] = {
+    getApplicationInfoList.filter(filter).take(max)
   }
 
   def getApplicationInfo(appId: String): Option[ApplicationInfo] = {

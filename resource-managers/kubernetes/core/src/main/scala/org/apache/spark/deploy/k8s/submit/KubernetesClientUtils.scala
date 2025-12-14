@@ -19,6 +19,7 @@ package org.apache.spark.deploy.k8s.submit
 
 import java.io.{File, StringWriter}
 import java.nio.charset.MalformedInputException
+import java.util.{List => JList, Map => JMap}
 import java.util.Properties
 
 import scala.collection.mutable
@@ -28,23 +29,34 @@ import scala.jdk.CollectionConverters._
 import io.fabric8.kubernetes.api.model.{ConfigMap, ConfigMapBuilder, KeyToPath}
 
 import org.apache.spark.SparkConf
+import org.apache.spark.annotation.{DeveloperApi, Since, Unstable}
 import org.apache.spark.deploy.k8s.{Config, Constants, KubernetesUtils}
 import org.apache.spark.deploy.k8s.Config.{KUBERNETES_DNS_SUBDOMAIN_NAME_MAX_LENGTH, KUBERNETES_NAMESPACE}
 import org.apache.spark.deploy.k8s.Constants.ENV_SPARK_CONF_DIR
-import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.Logging
 import org.apache.spark.internal.LogKeys.{CONFIG, PATH, PATHS}
 import org.apache.spark.util.ArrayImplicits._
 
-private[spark] object KubernetesClientUtils extends Logging {
+/**
+ * :: DeveloperApi ::
+ *
+ * A utility class used for K8s operations internally and Spark K8s operator.
+ */
+@Unstable
+@DeveloperApi
+object KubernetesClientUtils extends Logging {
 
   // Config map name can be KUBERNETES_DNS_SUBDOMAIN_NAME_MAX_LENGTH chars at max.
+  @Since("3.3.0")
   def configMapName(prefix: String): String = {
     val suffix = "-conf-map"
     s"${prefix.take(KUBERNETES_DNS_SUBDOMAIN_NAME_MAX_LENGTH - suffix.length)}$suffix"
   }
 
+  @Since("3.1.0")
   val configMapNameExecutor: String = configMapName(s"spark-exec-${KubernetesUtils.uniqueID()}")
 
+  @Since("3.1.0")
   val configMapNameDriver: String = configMapName(s"spark-drv-${KubernetesUtils.uniqueID()}")
 
   private def buildStringFromPropertiesMap(configMapName: String,
@@ -61,7 +73,20 @@ private[spark] object KubernetesClientUtils extends Logging {
 
   /**
    * Build, file -> 'file's content' map of all the selected files in SPARK_CONF_DIR.
+   * (Java-friendly)
    */
+  @Since("4.1.0")
+  def buildSparkConfDirFilesMapJava(
+      configMapName: String,
+      sparkConf: SparkConf,
+      resolvedPropertiesMap: JMap[String, String]): JMap[String, String] = synchronized {
+    buildSparkConfDirFilesMap(configMapName, sparkConf, resolvedPropertiesMap.asScala.toMap).asJava
+  }
+
+  /**
+   * Build, file -> 'file's content' map of all the selected files in SPARK_CONF_DIR.
+   */
+  @Since("3.1.1")
   def buildSparkConfDirFilesMap(
       configMapName: String,
       sparkConf: SparkConf,
@@ -77,6 +102,12 @@ private[spark] object KubernetesClientUtils extends Logging {
     }
   }
 
+  @Since("4.1.0")
+  def buildKeyToPathObjectsJava(confFilesMap: JMap[String, String]): JList[KeyToPath] = {
+    buildKeyToPathObjects(confFilesMap.asScala.toMap).asJava
+  }
+
+  @Since("3.1.0")
   def buildKeyToPathObjects(confFilesMap: Map[String, String]): Seq[KeyToPath] = {
     confFilesMap.map {
       case (fileName: String, _: String) =>
@@ -86,9 +117,20 @@ private[spark] object KubernetesClientUtils extends Logging {
   }
 
   /**
+   * Build a ConfigMap that will hold the content for environment variable SPARK_CONF_DIR
+   * on remote pods. (Java-friendly)
+   */
+  @Since("4.1.0")
+  def buildConfigMapJava(configMapName: String, confFileMap: JMap[String, String],
+      withLabels: JMap[String, String]): ConfigMap = {
+    buildConfigMap(configMapName, confFileMap.asScala.toMap, withLabels.asScala.toMap)
+  }
+
+  /**
    * Build a Config Map that will hold the content for environment variable SPARK_CONF_DIR
    * on remote pods.
    */
+  @Since("3.1.0")
   def buildConfigMap(configMapName: String, confFileMap: Map[String, String],
       withLabels: Map[String, String] = Map()): ConfigMap = {
     val configMapNameSpace =

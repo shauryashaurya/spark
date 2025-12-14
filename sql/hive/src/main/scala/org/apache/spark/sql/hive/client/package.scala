@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.hive
 
+import org.apache.spark.util.Utils
+
 /** Support for interacting with different versions of the HiveMetastoreClient */
 package object client {
   private[hive] sealed abstract class HiveVersion(
@@ -59,13 +61,12 @@ package object client {
         "org.pentaho:pentaho-aggdesigner-algorithm"))
 
     // Since HIVE-23980, calcite-core included in Hive package jar.
-    case object v2_3 extends HiveVersion("2.3.9",
+    case object v2_3 extends HiveVersion("2.3.10",
       exclusions = Seq("org.apache.calcite:calcite-core",
         "org.apache.calcite:calcite-druid",
         "org.apache.calcite.avatica:avatica",
-        "com.fasterxml.jackson.core:*",
         "org.apache.curator:*",
-        "org.pentaho:pentaho-aggdesigner-algorithm",
+        "net.hydromatic:aggdesigner-algorithm",
         "org.apache.hive:hive-vector-code-gen"))
 
     // Since Hive 3.0, HookUtils uses org.apache.logging.log4j.util.Strings
@@ -88,8 +89,48 @@ package object client {
         "org.pentaho:pentaho-aggdesigner-algorithm",
         "org.apache.hive:hive-vector-code-gen"))
 
+    case object v4_0 extends HiveVersion("4.0.1",
+      extraDeps = Seq("org.apache.hadoop:hadoop-hdfs:3.3.6",
+        "org.datanucleus:datanucleus-api-jdo:5.2.8",
+        "org.datanucleus:datanucleus-rdbms:5.2.10",
+        "org.datanucleus:javax.jdo:3.2.0-release",
+        "org.springframework:spring-core:5.3.21",
+        "org.springframework:spring-jdbc:5.3.21",
+        "org.antlr:antlr4-runtime:4.9.3",
+        "org.apache.derby:derby:10.14.2.0"),
+      exclusions = Seq("org.apache.calcite:calcite-druid",
+        "org.apache.curator:*",
+        "org.pentaho:pentaho-aggdesigner-algorithm",
+        "org.apache.hive:hive-vector-code-gen"))
+
+    case object v4_1 extends HiveVersion("4.1.0",
+      extraDeps =
+        "org.antlr:antlr4-runtime:4.9.3" ::
+        "org.apache.derby:derby:10.14.1.0" ::
+        "org.apache.hadoop:hadoop-hdfs:3.4.1" ::
+        "org.datanucleus:datanucleus-api-jdo:6.0.5" ::
+        "org.datanucleus:datanucleus-core:6.0.11" ::
+        "org.datanucleus:datanucleus-rdbms:6.0.10" ::
+        "org.datanucleus:javax.jdo:3.2.1" ::
+        "org.springframework:spring-core:5.3.39" ::
+        "org.springframework:spring-jdbc:5.3.39" :: Nil,
+      exclusions =
+        "org.apache.curator:*" ::
+        "org.apache.hive:hive-service-rpc" ::
+        "org.apache.zookeeper:zookeeper" :: Nil ++
+        {
+          if (!Utils.isTesting) {
+            // HiveClientImpl#runHive which is used for testing refers
+            // `org.apache.hadoop.hive.ql.DriverContext` indirectly and `DriverContext` refers
+            // Tez APIs.
+            Seq("org.apache.tez:tez-api")
+          } else {
+            Seq.empty
+          }
+        })
+
     val allSupportedHiveVersions: Set[HiveVersion] =
-      Set(v2_0, v2_1, v2_2, v2_3, v3_0, v3_1)
+      Set(v2_0, v2_1, v2_2, v2_3, v3_0, v3_1, v4_0, v4_1)
   }
   // scalastyle:on
 

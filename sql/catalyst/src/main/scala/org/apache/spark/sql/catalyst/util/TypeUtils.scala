@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.catalyst.util
 
-import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
+import org.apache.spark.sql.catalyst.analysis.{AnalysisErrorAt, TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.DataTypeMismatch
 import org.apache.spark.sql.catalyst.expressions.{Expression, RowOrdering}
 import org.apache.spark.sql.catalyst.types.{PhysicalDataType, PhysicalNumericType}
@@ -43,6 +43,16 @@ object TypeUtils extends QueryErrorsBase {
     }
   }
 
+  def tryThrowNotOrderableExpression(expression: Expression): Unit = {
+    if (!RowOrdering.isOrderable(expression.dataType)) {
+      expression.failAnalysis(
+        errorClass = "EXPRESSION_TYPE_IS_NOT_ORDERABLE",
+        messageParameters =
+          Map("expr" -> toSQLExpr(expression), "exprType" -> toSQLType(expression.dataType))
+      )
+    }
+  }
+
   def checkForSameTypeInputExpr(types: Seq[DataType], caller: String): TypeCheckResult = {
     if (TypeCoercion.haveSameType(types)) {
       TypeCheckResult.TypeCheckSuccess
@@ -58,7 +68,7 @@ object TypeUtils extends QueryErrorsBase {
   }
 
   def checkForMapKeyType(keyType: DataType): TypeCheckResult = {
-    if (keyType.existsRecursively(_.isInstanceOf[MapType])) {
+    if (keyType.existsRecursively(dt => dt.isInstanceOf[MapType] || dt.isInstanceOf[VariantType])) {
       DataTypeMismatch(
         errorSubClass = "INVALID_MAP_KEY_TYPE",
         messageParameters = Map(

@@ -37,6 +37,7 @@ import org.apache.spark.annotation.{DeveloperApi, Experimental, Since}
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.RDD_LIMIT_SCALE_UP_FACTOR
 import org.apache.spark.partial.BoundedDouble
@@ -210,7 +211,12 @@ abstract class RDD[T: ClassTag](
    * @return This RDD.
    */
   def unpersist(blocking: Boolean = false): this.type = {
-    logInfo(s"Removing RDD $id from persistence list")
+    if (isLocallyCheckpointed) {
+      // This means its lineage has been truncated and cannot be recomputed once unpersisted.
+      logWarning(log"RDD ${MDC(RDD_ID, id)} was locally checkpointed, its lineage has been" +
+        log" truncated and cannot be recomputed after unpersisting")
+    }
+    logInfo(log"Removing RDD ${MDC(RDD_ID, id)} from persistence list")
     sc.unpersistRDD(id, blocking)
     storageLevel = StorageLevel.NONE
     this
@@ -643,7 +649,8 @@ abstract class RDD[T: ClassTag](
           // this shouldn't happen often because we use a big multiplier for the initial size
           var numIters = 0
           while (samples.length < num) {
-            logWarning(s"Needed to re-sample due to insufficient sample size. Repeat #$numIters")
+            logWarning(log"Needed to re-sample due to insufficient sample size. " +
+              log"Repeat #${MDC(NUM_ITERATIONS, numIters)}")
             samples = this.sample(withReplacement, fraction, rand.nextInt()).collect()
             numIters += 1
           }
@@ -1766,7 +1773,7 @@ abstract class RDD[T: ClassTag](
   /**
    * Return whether this RDD is reliably checkpointed and materialized.
    */
-  private[rdd] def isReliablyCheckpointed: Boolean = {
+  private[spark] def isReliablyCheckpointed: Boolean = {
     checkpointData match {
       case Some(reliable: ReliableRDDCheckpointData[_]) if reliable.isCheckpointed => true
       case _ => false
@@ -1827,8 +1834,9 @@ abstract class RDD[T: ClassTag](
    * Please read the linked SPIP and design docs to understand the limitations and future plans.
    * @return an [[RDDBarrier]] instance that provides actions within a barrier stage
    * @see [[org.apache.spark.BarrierTaskContext]]
-   * @see <a href="https://jira.apache.org/jira/browse/SPARK-24374">SPIP: Barrier Execution Mode</a>
-   * @see <a href="https://jira.apache.org/jira/browse/SPARK-24582">Design Doc</a>
+   * @see <a href="https://issues.apache.org/jira/browse/SPARK-24374">
+   *        SPIP: Barrier Execution Mode</a>
+   * @see <a href="https://issues.apache.org/jira/browse/SPARK-24582">Design Doc</a>
    */
   @Experimental
   @Since("2.4.0")
@@ -2008,7 +2016,7 @@ abstract class RDD[T: ClassTag](
     def firstDebugString(rdd: RDD[_]): Seq[String] = {
       val partitionStr = "(" + rdd.partitions.length + ")"
       val leftOffset = (partitionStr.length - 1) / 2
-      val nextPrefix = (" " * leftOffset) + "|" + (" " * (partitionStr.length - leftOffset))
+      val nextPrefix = " ".repeat(leftOffset) + "|" + " ".repeat(partitionStr.length - leftOffset)
 
       debugSelf(rdd).zipWithIndex.map{
         case (desc: String, 0) => s"$partitionStr $desc"
@@ -2022,7 +2030,7 @@ abstract class RDD[T: ClassTag](
       val nextPrefix = (
         thisPrefix
         + (if (isLastChild) "  " else "| ")
-        + (" " * leftOffset) + "|" + (" " * (partitionStr.length - leftOffset)))
+        + (" ".repeat(leftOffset)) + "|" + (" ".repeat(partitionStr.length - leftOffset)))
 
       debugSelf(rdd).zipWithIndex.map{
         case (desc: String, 0) => s"$thisPrefix+-$partitionStr $desc"

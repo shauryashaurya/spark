@@ -29,12 +29,14 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.internal.config.{STORAGE_DECOMMISSION_FALLBACK_STORAGE_CLEANUP, STORAGE_DECOMMISSION_FALLBACK_STORAGE_PATH}
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef, RpcTimeout}
 import org.apache.spark.shuffle.{IndexShuffleBlockResolver, ShuffleBlockInfo}
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
+import org.apache.spark.storage.BlockManagerMessages.RemoveShuffle
 import org.apache.spark.util.Utils
 
 /**
@@ -84,7 +86,7 @@ private[storage] class FallbackStorage(conf: SparkConf) extends Logging {
           }
         }
       case r =>
-        logWarning(s"Unsupported Resolver: ${r.getClass.getName}")
+        logWarning(log"Unsupported Resolver: ${MDC(CLASS_NAME, r.getClass.getName)}")
     }
   }
 
@@ -94,7 +96,8 @@ private[storage] class FallbackStorage(conf: SparkConf) extends Logging {
   }
 }
 
-private[storage] class NoopRpcEndpointRef(conf: SparkConf) extends RpcEndpointRef(conf) {
+private[storage] class FallbackStorageRpcEndpointRef(conf: SparkConf, hadoopConf: Configuration)
+    extends RpcEndpointRef(conf) {
   // scalastyle:off executioncontextglobal
   import scala.concurrent.ExecutionContext.Implicits.global
   // scalastyle:on executioncontextglobal
@@ -102,6 +105,11 @@ private[storage] class NoopRpcEndpointRef(conf: SparkConf) extends RpcEndpointRe
   override def name: String = "fallback"
   override def send(message: Any): Unit = {}
   override def ask[T: ClassTag](message: Any, timeout: RpcTimeout): Future[T] = {
+    message match {
+      case RemoveShuffle(shuffleId) =>
+        FallbackStorage.cleanUp(conf, hadoopConf, Some(shuffleId))
+      case _ => // no-op
+    }
     Future{true.asInstanceOf[T]}
   }
 }
@@ -119,29 +127,34 @@ private[spark] object FallbackStorage extends Logging {
   }
 
   /** Register the fallback block manager and its RPC endpoint. */
-  def registerBlockManagerIfNeeded(master: BlockManagerMaster, conf: SparkConf): Unit = {
+  def registerBlockManagerIfNeeded(
+      master: BlockManagerMaster,
+      conf: SparkConf,
+      hadoopConf: Configuration): Unit = {
     if (conf.get(STORAGE_DECOMMISSION_FALLBACK_STORAGE_PATH).isDefined) {
       master.registerBlockManager(
-        FALLBACK_BLOCK_MANAGER_ID, Array.empty[String], 0, 0, new NoopRpcEndpointRef(conf))
+        FALLBACK_BLOCK_MANAGER_ID, Array.empty[String], 0, 0,
+        new FallbackStorageRpcEndpointRef(conf, hadoopConf))
     }
   }
 
-  /** Clean up the generated fallback location for this app. */
-  def cleanUp(conf: SparkConf, hadoopConf: Configuration): Unit = {
+  /** Clean up the generated fallback location for this app (and shuffle id if given). */
+  def cleanUp(conf: SparkConf, hadoopConf: Configuration, shuffleId: Option[Int] = None): Unit = {
     if (conf.get(STORAGE_DECOMMISSION_FALLBACK_STORAGE_PATH).isDefined &&
         conf.get(STORAGE_DECOMMISSION_FALLBACK_STORAGE_CLEANUP) &&
         conf.contains("spark.app.id")) {
-      val fallbackPath =
+      val fallbackPath = shuffleId.foldLeft(
         new Path(conf.get(STORAGE_DECOMMISSION_FALLBACK_STORAGE_PATH).get, conf.getAppId)
+      ) { case (path, shuffleId) => new Path(path, shuffleId.toString) }
       val fallbackUri = fallbackPath.toUri
       val fallbackFileSystem = FileSystem.get(fallbackUri, hadoopConf)
       // The fallback directory for this app may not be created yet.
       if (fallbackFileSystem.exists(fallbackPath)) {
         if (fallbackFileSystem.delete(fallbackPath, true)) {
-          logInfo(s"Succeed to clean up: $fallbackUri")
+          logInfo(log"Succeed to clean up: ${MDC(URI, fallbackUri)}")
         } else {
           // Clean-up can fail due to the permission issues.
-          logWarning(s"Failed to clean up: $fallbackUri")
+          logWarning(log"Failed to clean up: ${MDC(URI, fallbackUri)}")
         }
       }
     }
@@ -158,7 +171,7 @@ private[spark] object FallbackStorage extends Logging {
    * Read a ManagedBuffer.
    */
   def read(conf: SparkConf, blockId: BlockId): ManagedBuffer = {
-    logInfo(s"Read $blockId")
+    logInfo(log"Read ${MDC(BLOCK_ID, blockId)}")
     val fallbackPath = new Path(conf.get(STORAGE_DECOMMISSION_FALLBACK_STORAGE_PATH).get)
     val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
     val fallbackFileSystem = FileSystem.get(fallbackPath.toUri, hadoopConf)

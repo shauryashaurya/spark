@@ -1,56 +1,56 @@
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 encode for 1:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               2210           2233          38          9.1         110.5       1.0X
-apache                                            11572          11644          66          1.7         578.6       0.2X
+java                                               1435           1474          35         13.9          71.8       1.0X
+apache                                            20416          21380         928          1.0        1020.8       0.1X
 
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 encode for 3:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               2586           2604          18          7.7         129.3       1.0X
-apache                                            12940          12986          41          1.5         647.0       0.2X
+java                                               1788           1818          40         11.2          89.4       1.0X
+apache                                            20988          21929         822          1.0        1049.4       0.1X
 
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 encode for 5:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               3053           3065          16          6.6         152.7       1.0X
-apache                                            14277          14321          60          1.4         713.9       0.2X
+java                                               2119           2135          23          9.4         106.0       1.0X
+apache                                            23162          23675         496          0.9        1158.1       0.1X
 
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 encode for 7:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               3106           3113          10          6.4         155.3       1.0X
-apache                                            15346          15382          37          1.3         767.3       0.2X
+java                                               2015           2026          13          9.9         100.7       1.0X
+apache                                            23184          23584         350          0.9        1159.2       0.1X
 
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 decode for 1:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               3494           3500           5          5.7         174.7       1.0X
-apache                                            12827          12950         107          1.6         641.4       0.3X
+java                                               2763           2777          21          7.2         138.2       1.0X
+apache                                            20491          21037         562          1.0        1024.6       0.1X
 
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 decode for 3:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               4203           4205           3          4.8         210.1       1.0X
-apache                                            15071          15122          61          1.3         753.5       0.3X
+java                                               3285           3288           3          6.1         164.3       1.0X
+apache                                            22329          22557         257          0.9        1116.5       0.1X
 
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 decode for 5:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               5025           5042          16          4.0         251.3       1.0X
-apache                                            17056          17140          88          1.2         852.8       0.3X
+java                                               4135           4150          13          4.8         206.8       1.0X
+apache                                            24081          24327         272          0.8        1204.1       0.2X
 
-OpenJDK 64-Bit Server VM 21.0.2+13-LTS on Linux 6.5.0-1016-azure
-AMD EPYC 7763 64-Core Processor
+OpenJDK 64-Bit Server VM 21.0.8+9-LTS on Linux 6.11.0-1018-azure
+Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 decode for 7:                             Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-java                                               5414           5497         139          3.7         270.7       1.0X
-apache                                            18678          18825         130          1.1         933.9       0.3X
+java                                               4329           4334           6          4.6         216.5       1.0X
+apache                                            25386          25691         321          0.8        1269.3       0.2X
 

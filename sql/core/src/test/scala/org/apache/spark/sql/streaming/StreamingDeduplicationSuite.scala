@@ -18,19 +18,28 @@
 package org.apache.spark.sql.streaming
 
 import java.io.File
+import java.util.UUID
 
-import org.apache.commons.io.FileUtils
+import org.apache.hadoop.conf.Configuration
 
-import org.apache.spark.sql.DataFrame
+import org.apache.spark.SparkUnsupportedOperationException
+import org.apache.spark.sql.{DataFrame, Dataset}
+import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, UnsafeProjection}
 import org.apache.spark.sql.catalyst.streaming.InternalOutputModes._
-import org.apache.spark.sql.execution.streaming.MemoryStream
+import org.apache.spark.sql.execution.streaming.operators.stateful.StatefulOperatorsUtils
+import org.apache.spark.sql.execution.streaming.operators.stateful.StatePartitionKeyExtractorFactory
+import org.apache.spark.sql.execution.streaming.runtime.MemoryStream
+import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.{StringType, StructType}
 import org.apache.spark.tags.SlowSQLTest
+import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.Utils
 
 @SlowSQLTest
-class StreamingDeduplicationSuite extends StateStoreMetricsTest {
+class StreamingDeduplicationSuite extends StateStoreMetricsTest
+  with StreamingDeduplicationSuiteBase {
 
   import testImplicits._
 
@@ -319,7 +328,7 @@ class StreamingDeduplicationSuite extends StateStoreMetricsTest {
         },
         AssertOnQuery { q =>
           eventually(timeout(streamingTimeout)) {
-            q.lastProgress.sink.numOutputRows == 0L
+            assert(q.lastProgress.sink.numOutputRows == 0L)
             true
           }
         }
@@ -451,28 +460,29 @@ class StreamingDeduplicationSuite extends StateStoreMetricsTest {
     }
   }
 
-  test("SPARK-39650: recovery from checkpoint having all columns as value schema") {
-    // NOTE: We are also changing the schema of input compared to the checkpoint. In the checkpoint
-    // we define the input schema as (String, Int).
-    val inputData = MemoryStream[(String, Int, String)]
-    val dedupe = inputData.toDS().dropDuplicates("_1")
+  Seq("3.3.0", "3.5.1").foreach { sparkVersion =>
+    test("SPARK-39650: recovery from checkpoint having all columns as value schema " +
+      s"with sparkVersion=$sparkVersion") {
+      // NOTE: We are also changing the schema of input compared to the checkpoint.
+      // In the checkpoint we define the input schema as (String, Int).
+      val inputData = MemoryStream[(String, Int, String)]
+      val dedupe = inputData.toDS().dropDuplicates("_1")
 
-    // The fix will land after Spark 3.3.0, hence we can check backward compatibility with
-    // checkpoint being built from Spark 3.3.0.
-    val resourceUri = this.getClass.getResource(
-      "/structured-streaming/checkpoint-version-3.3.0-streaming-deduplication/").toURI
+      val resourcePath = "/structured-streaming/checkpoint-version-" + sparkVersion +
+        "-streaming-deduplication/"
+      val resourceUri = this.getClass.getResource(resourcePath).toURI
 
-    val checkpointDir = Utils.createTempDir().getCanonicalFile
-    // Copy the checkpoint to a temp dir to prevent changes to the original.
-    // Not doing this will lead to the test passing on the first run, but fail subsequent runs.
-    FileUtils.copyDirectory(new File(resourceUri), checkpointDir)
+      val checkpointDir = Utils.createTempDir().getCanonicalFile
+      // Copy the checkpoint to a temp dir to prevent changes to the original.
+      // Not doing this will lead to the test passing on the first run, but fail subsequent runs.
+      Utils.copyDirectory(new File(resourceUri), checkpointDir)
 
-    inputData.addData(("a", 1, "dummy"))
-    inputData.addData(("a", 2, "dummy"), ("b", 3, "dummy"))
+      inputData.addData(("a", 1, "dummy"))
+      inputData.addData(("a", 2, "dummy"), ("b", 3, "dummy"))
 
-    testStream(dedupe, Append)(
-      StartStream(checkpointLocation = checkpointDir.getAbsolutePath),
-      /*
+      testStream(dedupe, Append)(
+        StartStream(checkpointLocation = checkpointDir.getAbsolutePath),
+        /*
         Note: The checkpoint was generated using the following input in Spark version 3.3.0
         AddData(inputData, ("a", 1)),
         CheckLastBatch(("a", 1)),
@@ -480,9 +490,207 @@ class StreamingDeduplicationSuite extends StateStoreMetricsTest {
         CheckLastBatch(("b", 3))
        */
 
-      AddData(inputData, ("a", 5, "a"), ("b", 2, "b"), ("c", 9, "c")),
-      CheckLastBatch(("c", 9, "c"))
+        AddData(inputData, ("a", 5, "a"), ("b", 2, "b"), ("c", 9, "c")),
+        CheckLastBatch(("c", 9, "c"))
+      )
+    }
+  }
+
+  Seq("3.3.0", "3.5.1").foreach { sparkVersion =>
+    test("SPARK-39650: recovery from checkpoint with changes on key schema " +
+      s"are not allowed with sparkVersion=$sparkVersion") {
+      // NOTE: We are also changing the schema of input compared to the checkpoint.
+      // In the checkpoint we define the input schema as (String, Int).
+      val inputData = MemoryStream[(String, Int, String)]
+      val dedupe = inputData.toDS().dropDuplicates("_1", "_2")
+
+      val resourcePath = "/structured-streaming/checkpoint-version-" + sparkVersion +
+        "-streaming-deduplication/"
+      val resourceUri = this.getClass.getResource(resourcePath).toURI
+
+      val checkpointDir = Utils.createTempDir().getCanonicalFile
+      // Copy the checkpoint to a temp dir to prevent changes to the original.
+      // Not doing this will lead to the test passing on the first run, but fail subsequent runs.
+      Utils.copyDirectory(new File(resourceUri), checkpointDir)
+
+      inputData.addData(("a", 1, "dummy"))
+      inputData.addData(("a", 2, "dummy"), ("b", 3, "dummy"))
+
+      // trying to evolve the key schema is not allowed and should throw an exception
+      val ex = intercept[StreamingQueryException] {
+        testStream(dedupe, Append)(
+          StartStream(checkpointLocation = checkpointDir.getAbsolutePath),
+          AddData(inputData, ("a", 5, "a"), ("b", 2, "b"), ("c", 9, "c")),
+          CheckLastBatch(("a", 5, "a"), ("b", 2, "b"), ("c", 9, "c"))
+        )
+      }
+
+      // verify that the key schema not compatible error is thrown
+      checkError(
+        ex.getCause.asInstanceOf[SparkUnsupportedOperationException],
+        condition = "STATE_STORE_KEY_SCHEMA_NOT_COMPATIBLE",
+        parameters = Map("storedKeySchema" -> ".*",
+          "newKeySchema" -> ".*"),
+        matchPVals = true
+      )
+    }
+  }
+
+  test("collation aware deduplication") {
+    val inputData = MemoryStream[(String, Int)]
+    val result = inputData.toDF()
+      .select(col("_1")
+        .try_cast(StringType("UTF8_BINARY")).as("str"),
+        col("_2").as("int"))
+      .dropDuplicates("str")
+
+    testStream(result, Append)(
+      AddData(inputData, "a" -> 1),
+      CheckLastBatch("a" -> 1),
+      assertNumStateRows(total = 1, updated = 1, droppedByWatermark = 0),
+      AddData(inputData, "a" -> 2), // Dropped
+      CheckLastBatch(),
+      assertNumStateRows(total = 1, updated = 0, droppedByWatermark = 0),
+      // scalastyle:off
+      AddData(inputData, "ä" -> 1),
+      CheckLastBatch("ä" -> 1),
+      // scalastyle:on
+      assertNumStateRows(total = 2, updated = 1, droppedByWatermark = 0)
     )
+  }
+
+  test("non-binary collation aware deduplication not supported") {
+    val inputData = MemoryStream[(String)]
+    val result = inputData.toDF()
+      .select(col("value")
+        .try_cast(StringType("UTF8_LCASE")).as("str"))
+      .dropDuplicates("str")
+
+    val ex = intercept[StreamingQueryException] {
+      testStream(result, Append)(
+        AddData(inputData, "a"),
+        CheckLastBatch("a"))
+    }
+
+    checkError(
+      ex.getCause.asInstanceOf[SparkUnsupportedOperationException],
+      condition = "STATE_STORE_UNSUPPORTED_OPERATION_BINARY_INEQUALITY",
+      parameters = Map(
+        "schema" -> ".+\"str\":\"spark.UTF8_LCASE\".+"
+      ),
+      matchPVals = true
+    )
+  }
+
+  test("test that avro encoding is not supported") {
+    val inputData = MemoryStream[String]
+    val result = inputData.toDS().dropDuplicates()
+
+    val ex = intercept[Exception] {
+      withSQLConf(SQLConf.STREAMING_STATE_STORE_ENCODING_FORMAT.key -> "avro") {
+        testStream(result, Append)(
+          AddData(inputData, "a"),
+          ProcessAllAvailable()
+        )
+      }
+    }
+    assert(ex.getMessage.contains("State store encoding format as avro is not supported"))
+  }
+
+  test("Partition key extraction - Dedupe") {
+    val df = (input: Dataset[(String, Int)]) => input.dropDuplicates("_1").toDF()
+
+    testPartitionKeyExtraction(
+      StatefulOperatorsUtils.DEDUPLICATE_EXEC_OP_NAME,
+      inputData = Seq(("a", 1), ("b", 2), ("c", 3)),
+      dedupeDF = df,
+      // The key schema for dedup is just the _1 column (String)
+      keySchema = new StructType().add("_1", StringType),
+      // Empty value schema for dedup
+      valueSchema = new StructType(),
+      sqlConf = spark.sessionState.conf
+    )
+  }
+}
+
+trait StreamingDeduplicationSuiteBase { self: StreamTest =>
+  import testImplicits._
+
+  protected def testPartitionKeyExtraction(
+      operatorName: String,
+      inputData: Seq[(String, Int)],
+      dedupeDF: Dataset[(String, Int)] => DataFrame,
+      keySchema: StructType,
+      valueSchema: StructType,
+      sqlConf: SQLConf): Unit = {
+    withTempDir { checkpointDir =>
+      // 1 partition to make verification easier
+      val conf = Map(SQLConf.SHUFFLE_PARTITIONS.key -> "1")
+
+      val inputStream = MemoryStream[(String, Int)]
+
+      // Run streaming query to populate state
+      testStream(dedupeDF(inputStream.toDS()), Append)(
+        StartStream(checkpointLocation = checkpointDir.getAbsolutePath, additionalConfs = conf),
+        AddData(inputStream, inputData: _*),
+        ProcessAllAvailable(),
+        StopStream
+      )
+
+      // Now access the state store to verify partition key extraction
+      val storeConf = new StateStoreConf(sqlConf)
+      val storeId = StateStoreId(checkpointDir.getAbsolutePath + "/state", 0, 0)
+      val storeProviderId = StateStoreProviderId(storeId, UUID.randomUUID())
+
+      val keyProjection = UnsafeProjection.create(keySchema)
+      def createExpectedKeyRow(inputKey: String) = {
+        val row = new GenericInternalRow(Array[Any](UTF8String.fromString(inputKey)))
+        keyProjection.apply(row).copy()
+      }
+
+      val store = StateStore.getReadOnly(
+        storeProviderId,
+        keySchema,
+        valueSchema,
+        NoPrefixKeyStateEncoderSpec(keySchema),
+        version = 1,
+        stateStoreCkptId = None,
+        stateSchemaBroadcast = None,
+        useColumnFamilies = false,
+        storeConf,
+        new Configuration
+      )
+
+      try {
+        val extractor = StatePartitionKeyExtractorFactory.create(
+          operatorName,
+          keySchema
+        )
+
+        // Verify partition key schema matches the key schema
+        assert(extractor.partitionKeySchema === keySchema,
+          "Partition key schema should match the dedup key schema")
+
+        // Get all state keys written by the dedup query
+        val stateKeys = store.iterator().map(_.key.copy()).toList
+        assert(stateKeys.length === inputData.length,
+          s"Should have ${inputData.length} unique keys, found ${stateKeys.length}")
+
+        // Extract partition keys
+        val partitionKeys = stateKeys.map(extractor.partitionKey(_).copy())
+        // Verify each partition key equals its corresponding state key (for dedup)
+        assert(partitionKeys === stateKeys,
+          "Partition keys should match state keys")
+
+        // Expected keys
+        inputData.foreach { case (key, _) =>
+          val keyRow = createExpectedKeyRow(key)
+          assert(partitionKeys.count(_ === keyRow) == 1, s"Should have 1 partition key for $key")
+        }
+      } finally {
+        store.abort()
+      }
+    }
   }
 }
 
