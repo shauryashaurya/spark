@@ -1010,12 +1010,8 @@ class TransformWithStateInPandasStateVariableTests(
 
 
 if __name__ == "__main__":
-    from pyspark.sql.tests.pandas.streaming.test_pandas_transform_with_state import *  # noqa: F401
+    from pyspark.sql.tests.pandas.streaming.test_pandas_transform_with_state import *
 
-    try:
-        import xmlrunner
+    from pyspark.testing import main
 
-        testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
-    except ImportError:
-        testRunner = None
-    unittest.main(testRunner=testRunner, verbosity=2)
+    main()

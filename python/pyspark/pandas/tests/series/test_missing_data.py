@@ -14,12 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import unittest
 
 import numpy as np
 import pandas as pd
 
 from pyspark import pandas as ps
+from pyspark.loose_version import LooseVersion
 from pyspark.testing.pandasutils import PandasOnSparkTestCase
 from pyspark.testing.sqlutils import SQLTestUtils
 
@@ -59,15 +59,19 @@ class SeriesMissingDataMixin:
         pser.loc[3] = np.nan
         psser.loc[3] = np.nan
 
-        self.assert_eq(psser.fillna(0), pser.fillna(0))
-        self.assert_eq(psser.fillna(method="ffill"), pser.fillna(method="ffill"))
-        self.assert_eq(
-            psser.fillna(method="bfill").sort_index(), pser.fillna(method="bfill").sort_index()
-        )
-        self.assert_eq(
-            psser.fillna(method="backfill").sort_index(),
-            pser.fillna(method="backfill").sort_index(),
-        )
+        if LooseVersion(pd.__version__) < "3.0.0":
+            self.assert_eq(psser.fillna(0), pser.fillna(0))
+            self.assert_eq(psser.fillna(method="ffill"), pser.fillna(method="ffill"))
+            self.assert_eq(
+                psser.fillna(method="bfill").sort_index(), pser.fillna(method="bfill").sort_index()
+            )
+            self.assert_eq(
+                psser.fillna(method="backfill").sort_index(),
+                pser.fillna(method="backfill").sort_index(),
+            )
+        else:
+            with self.assertRaises(TypeError):
+                psser.fillna(method="ffill")
 
         # inplace fillna on non-nullable column
         pdf = pd.DataFrame({"a": [1, 2, None], "b": [1, 2, 3]})
@@ -207,26 +211,34 @@ class SeriesMissingDataMixin:
         psdf = ps.from_pandas(pdf)
         pser, psser = pdf.x, psdf.x
 
-        self.assert_eq(pser.pad(), psser.pad())
+        if LooseVersion(pd.__version__) < "3.0.0":
+            self.assert_eq(pser.pad(), psser.pad())
 
-        # Test `inplace=True`
-        pser.pad(inplace=True)
-        psser.pad(inplace=True)
-        self.assert_eq(pser, psser)
-        self.assert_eq(pdf, psdf)
+            # Test `inplace=True`
+            pser.pad(inplace=True)
+            psser.pad(inplace=True)
+            self.assert_eq(pser, psser)
+            self.assert_eq(pdf, psdf)
+        else:
+            with self.assertRaises(AttributeError):
+                psser.pad()
 
     def test_backfill(self):
         pdf = pd.DataFrame({"x": [np.nan, 2, 3, 4, np.nan, 6]})
         psdf = ps.from_pandas(pdf)
         pser, psser = pdf.x, psdf.x
 
-        self.assert_eq(pser.backfill().sort_index(), psser.backfill().sort_index())
+        if LooseVersion(pd.__version__) < "3.0.0":
+            self.assert_eq(pser.backfill().sort_index(), psser.backfill().sort_index())
 
-        # Test `inplace=True`
-        pser.backfill(inplace=True)
-        psser.backfill(inplace=True)
-        self.assert_eq(pser.sort_index(), psser.sort_index())
-        self.assert_eq(pdf.sort_index(), psdf.sort_index())
+            # Test `inplace=True`
+            pser.backfill(inplace=True)
+            psser.backfill(inplace=True)
+            self.assert_eq(pser.sort_index(), psser.sort_index())
+            self.assert_eq(pdf.sort_index(), psdf.sort_index())
+        else:
+            with self.assertRaises(AttributeError):
+                psser.backfill()
 
 
 class SeriesMissingDataTests(
@@ -238,12 +250,6 @@ class SeriesMissingDataTests(
 
 
 if __name__ == "__main__":
-    from pyspark.pandas.tests.series.test_missing_data import *  # noqa: F401
+    from pyspark.testing import main
 
-    try:
-        import xmlrunner
-
-        testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
-    except ImportError:
-        testRunner = None
-    unittest.main(testRunner=testRunner, verbosity=2)
+    main()

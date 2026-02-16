@@ -242,7 +242,7 @@ class SparkConnectPlanner(
     }
 
     if (executeHolderOpt.isDefined) {
-      plan.transformUpWithSubqueriesAndPruning(_.containsPattern(TreePattern.COLLECT_METRICS)) {
+      plan.foreachWithSubqueriesAndPruning(_.containsPattern(TreePattern.COLLECT_METRICS)) {
         case collectMetrics: CollectMetrics if !collectMetrics.child.isStreaming =>
           // TODO this might be too complex for no good reason. It might
           //  be easier to inspect the plan after it completes.
@@ -250,9 +250,10 @@ class SparkConnectPlanner(
             collectMetrics.name,
             collectMetrics.dataframeId)
           executeHolder.addObservation(collectMetrics.name, observation)
-          collectMetrics
+        case _ =>
       }
-    } else plan
+    }
+    plan
   }
 
   private def transformRelationPlugin(extension: ProtoAny): LogicalPlan = {
@@ -263,7 +264,7 @@ class SparkConnectPlanner(
       .map(p => p.transform(extension.toByteArray, this))
       // Find the first non-empty transformation or throw.
       .find(_.isPresent)
-      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension())
+      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension(extension.getTypeUrl))
       .get()
   }
 
@@ -1696,6 +1697,9 @@ class SparkConnectPlanner(
         if (streamSource.getSchema.nonEmpty) {
           reader.schema(parseSchema(streamSource.getSchema))
         }
+        if (streamSource.hasSourceName) {
+          reader.name(streamSource.getSourceName)
+        }
         val streamDF = streamSource.getPathsCount match {
           case 0 => reader.load()
           case 1 => reader.load(streamSource.getPaths(0))
@@ -1944,7 +1948,7 @@ class SparkConnectPlanner(
       .map(p => p.transform(extension.toByteArray, this))
       // Find the first non-empty transformation or throw.
       .find(_.isPresent)
-      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension())
+      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension(extension.getTypeUrl))
       .get
   }
 
@@ -3226,7 +3230,7 @@ class SparkConnectPlanner(
       .map(p => p.process(extension.toByteArray, this))
       // Find the first non-empty transformation or throw.
       .find(_ == true)
-      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension())
+      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension(extension.getTypeUrl))
     executeHolder.eventsManager.postFinished()
   }
 
@@ -3432,6 +3436,8 @@ class SparkConnectPlanner(
         writer.trigger(Trigger.Once())
       case TriggerCase.CONTINUOUS_CHECKPOINT_INTERVAL =>
         writer.trigger(Trigger.Continuous(writeOp.getContinuousCheckpointInterval))
+      case TriggerCase.REAL_TIME_BATCH_DURATION =>
+        writer.trigger(Trigger.RealTime(writeOp.getRealTimeBatchDuration))
       case TriggerCase.TRIGGER_NOT_SET =>
     }
 

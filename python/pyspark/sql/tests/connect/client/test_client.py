@@ -158,7 +158,7 @@ if should_test_connect:
             buf = sink.getvalue()
             resp.arrow_batch.data = buf.to_pybytes()
             resp.arrow_batch.row_count = 2
-            return [resp]
+            return iter([resp])
 
         def Interrupt(self, req: proto.InterruptRequest, metadata):
             self.req = req
@@ -656,12 +656,6 @@ class SparkConnectClientReattachTestCase(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    from pyspark.sql.tests.connect.client.test_client import *  # noqa: F401
+    from pyspark.testing import main
 
-    try:
-        import xmlrunner  # type: ignore
-
-        testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
-    except ImportError:
-        testRunner = None
-    unittest.main(testRunner=testRunner, verbosity=2)
+    main()

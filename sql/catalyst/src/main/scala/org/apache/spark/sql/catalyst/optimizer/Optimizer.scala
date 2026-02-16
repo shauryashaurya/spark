@@ -264,6 +264,7 @@ abstract class Optimizer(catalogManager: CatalogManager)
       CheckCartesianProducts),
     Batch("RewriteSubquery", Once,
       RewritePredicateSubquery,
+      NullPropagation,
       PushPredicateThroughJoin,
       LimitPushDown,
       ColumnPruning,
@@ -1067,7 +1068,7 @@ object ColumnPruning extends Rule[LogicalPlan] {
       a.copy(child = Expand(newProjects, newOutput, grandChild))
 
     // Prune and drop AttachDistributedSequence if the produced attribute is not referred.
-    case p @ Project(_, a @ AttachDistributedSequence(_, grandChild))
+    case p @ Project(_, a @ AttachDistributedSequence(_, grandChild, _))
         if !p.references.contains(a.sequenceAttr) =>
       p.copy(child = prunedChild(grandChild, p.references))
 

@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 20
       matrix:
         # keep in sync with default value of workflow_dispatch input 'branch'
         branch: ${{ fromJSON( inputs.branch || '["master", "branch-4.1", "branch-4.0", "branch-3.5"]' ) }}
@@ -67,6 +68,7 @@ jobs:
       env:
         ASF_USERNAME: ${{ secrets.NEXUS_USER }}
         ASF_PASSWORD: ${{ secrets.NEXUS_PW }}
+        ASF_NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
         GPG_KEY: "not_used"
         GPG_PASSPHRASE: "not_used"
         GIT_REF: ${{ matrix.branch }}
